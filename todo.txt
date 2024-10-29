@@ -1,0 +1,20 @@
+Error handling- Handle timeouts, handle busy anthropic API, handle problems with spritzl (we want the chatbot to know the error)
+
+Update sequence cache to have access to db mappings and handle additional data (eg. alignments)
+Guide for processes (eg what tool file contains) + docs
+
+Frontend- alignment viewer
+
+use GtRNAdb ids information in chatbot input
+
+make this a server supporting SSEs for response stream, also figure out how to sync db with frontend?
+set up front end
+
+self.mapping_file_path = './db_mappings/gtrnadb_mappings.tsv'
+
+
+
+Do we really want the chatbot summarizing 10 sequences (if we asked it to get 10?)
+No. Address in system prompt.
+
+Add ss to db

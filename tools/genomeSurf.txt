@@ -1,0 +1,2 @@
+Give the bot access to genomic information
+gtrnadb names include assembly and position

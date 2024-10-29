@@ -1,0 +1,10 @@
+__pycache__/
+tools/data/
+todo.txt/
+sequence_cache.db/
+tempTest.py/
+tools/__pycache__/
+tools/trna_software/
+tools.genomeSurf.txt/
+tools/basicAlignment.py/
+
