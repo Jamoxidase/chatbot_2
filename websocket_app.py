@@ -4,7 +4,7 @@ import websockets
 import json
 from chatbot import TwoAgentChatbot
 from cache import SequenceCache
-import sqlite3
+import sqlite3 
 from typing import Set, Optional
 import logging
 import traceback
@@ -200,12 +200,41 @@ class WebSocketServer:
         finally:
             await self.unregister(websocket)
 
-    async def start(self, host='localhost', port=8765):
-        print(f"Starting WebSocket server on ws://{host}:{port}")
-        async with websockets.serve(self.handle_message, host, port):
-            print("WebSocket server is running...")
+    async def start(self, host='0.0.0.0', port=8765):
+        """Start the WebSocket server with CORS support"""
+        logger.info(f"Starting WebSocket server on ws://{host}:{port}")
+
+        # Add CORS headers
+        async def cors_handler(websocket):
+            try:
+                # Add extra logging for connection attempts
+                logger.info(f"New connection attempt from {websocket.remote_address}")
+                await self.handle_message(websocket)
+            except Exception as e:
+                logger.error(f"Error in connection: {str(e)}")
+                logger.error(traceback.format_exc())
+
+        async with websockets.serve(
+            cors_handler,
+            host,
+            port,
+            ping_interval=None,
+            compression=None,
+            extra_headers=[
+                ('Access-Control-Allow-Origin', 'https://jamoxidase.github.io'),
+                ('Access-Control-Allow-Methods', 'GET, POST'),
+                ('Access-Control-Allow-Headers', '*'),
+            ]
+        ) as server:
+            logger.info("WebSocket server is running...")
             await asyncio.Future()
 
 if __name__ == "__main__":
-    server = WebSocketServer()
-    asyncio.run(server.start())
+    try:
+        server = WebSocketServer()
+        asyncio.run(server.start())
+    except KeyboardInterrupt:
+        logger.info("Server shutdown requested")
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(traceback.format_exc())

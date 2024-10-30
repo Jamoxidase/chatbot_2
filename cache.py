@@ -91,22 +91,20 @@ class SequenceCache:
             
             conn.commit()
 
-    def add_sequence(self, sequence_id: str, sequence_data: Any):
+    def add_sequence(self, sequence_id: str, sequence_data: Any, friendly_name: Optional[str] = None):
         """Add sequence to both memory cache and persistent storage with location information"""
         print("Adding sequence:", sequence_id)
-        print("Callback exists:", self.db_update_callback is not None)
-        print("Event loop exists:", self.loop is not None)
+        print("With friendly_name:", friendly_name)
         
         # Get mapping information if available
-        locations, friendly_name = self._id_mapping.get(sequence_id, ([], None))
+        locations, mapped_friendly_name = self._id_mapping.get(sequence_id, ([], None))
+        
+        # Use provided friendly_name if available, otherwise use mapped one
+        final_friendly_name = friendly_name or mapped_friendly_name
         
         # Generate RNAcentral link
         rnacentral_link = f"{self.RNACENTRAL_BASE_URL}{sequence_id}"
         
-        # Add to memory cache
-        self._memory_cache[sequence_id] = sequence_data
-        
-        # Add to SQLite database with metadata
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -119,7 +117,7 @@ class SequenceCache:
                     json.dumps(sequence_data),
                     len(locations),
                     json.dumps(locations),
-                    friendly_name,
+                    final_friendly_name,  # Use the final friendly name
                     rnacentral_link
                 )
             )
@@ -325,18 +323,35 @@ class SequenceCache:
             print(f"Error updating {tool_name} data: {str(e)}")
             return False
 
-
-    def clear(self):
-        """Clear both memory cache and persistent storage"""
-        self._memory_cache.clear()
+    def search_by_field(self, field: str, value: str) -> List[Dict[str, Any]]:
+        """Search sequences by a specific field"""
+        print(f"Searching by field: {field} with value: {value}")  # debug
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute('DELETE FROM sequences')
-            conn.commit()
-
-        # Notify about clear
-        if self.db_update_callback:
-            asyncio.create_task(self.db_update_callback(None, 'clear'))
+            cursor.execute(
+                '''SELECT sequence_id, sequence_data, num_locations, locations, 
+                        friendly_name, rnacentral_link,
+                        trnascan_se_ss, sprinzl_pos, blocks_file
+                FROM sequences WHERE ''' + field + ''' LIKE ?''',
+                (f'%{value}%',)
+            )
+            
+            results = []
+            for row in cursor.fetchall():
+                data = {
+                    'sequence_data': json.loads(row[1]),
+                    'num_locations': row[2],
+                    'locations': json.loads(row[3]) if row[3] else [],
+                    'friendly_name': row[4],
+                    'rnacentral_link': row[5],
+                    'tool_data': {
+                        'trnascan_se_ss': json.loads(row[6]) if row[6] else None,
+                        'sprinzl_pos': json.loads(row[7]) if row[7] else None,
+                        'blocks_file': row[8] if row[8] else None
+                    }
+                }
+                results.append(data)
+            return results
 
     def cleanup_old_entries(self, days: int = 30):
         """Remove entries older than specified days"""
@@ -377,6 +392,9 @@ class SequenceCache:
         # Notify about clear with specific update type
         if self.db_update_callback:
             asyncio.create_task(self.db_update_callback(update_type='clear'))
+
+
+
 
 
 if __name__ == "__main__":
@@ -454,8 +472,57 @@ URS00001DA281	GTRNADB	GTRNADB:tRNA-SeC-TCA-1-1:CM000681.2:45478601-45478687	9606
         assert result is None, "Should return None for non-existent sequence"
         print("✓ Test 6 passed")
 
-        print("\nAll tests passed!")
+        # Test 7: Test searching by friendly_name
+        print("\nTest 7: Testing search by friendly_name")
+        test_rnacentral_id = "URS000000002F_4950"
+        test_sequence_data = {"sequence": "ACGT", "extra_field": "test"}
+        test_friendly_name = "tRNA-Leu-GAG-1-1"
+        #CHECK_DB friendly_name:"tRNA-Leu-CAA-4-1" operation:"AND"
+        # Add a sequence first
+        cache.add_sequence(test_rnacentral_id, test_sequence_data)
 
+        # Test searching by friendly_name
+        results = cache.search_by_field('friendly_name', test_friendly_name)
+        assert len(results) > 0, "Failed to find sequence by friendly_name"
+        assert results[0]['friendly_name'] == test_friendly_name, "Friendly name mismatch"
+        print("✓ Test 7 passed")
+
+        # Test 8: Test searching by non-existent friendly_name
+        print("\nTest 8: Testing search by non-existent friendly_name")
+        results = cache.search_by_field('friendly_name', 'non-existent-name')
+        assert len(results) == 0, "Should return empty list for non-existent friendly_name"
+        print("✓ Test 8 passed")
+
+
+        # Test 9: Test realistic bot query using CHECK_DB tool
+        print("\nTest 9: Testing realistic bot CHECK_DB query")
+        # First setup some test data
+        test_sequence_data = {
+            "sequence": "ACGT",
+            "extra_field": "test"
+}
+        cache.add_sequence("URS0000TEST123_9606", test_sequence_data)
+        from tools.cacheCrawl import DBSearchTool
+        # Create DBSearchTool instance
+        db_tool = DBSearchTool(cache)
+
+        # Test realistic bot query format
+        bot_query = 'CHECK_DB friendly_name:"tRNA-Leu-CAA-4-1" operation:"AND"'
+        result = db_tool.use_db_search_tool(bot_query)
+
+        assert 'results' in result, "Missing results key in response"
+        # Check the structure matches what the bot expects
+        assert isinstance(result['results'], dict), "Results should be a dictionary"
+        print("✓ Test 9 passed")
+
+        # Test 10: Test another common bot query format
+        print("\nTest 10: Testing sequence_id query")
+        bot_query_2 = 'CHECK_DB sequence_id:"URS0000TEST123_9606" operation:"AND"'
+        result_2 = db_tool.use_db_search_tool(bot_query_2)
+
+        assert 'results' in result_2, "Missing results key in response"
+        assert isinstance(result_2['results'], dict), "Results should be a dictionary"
+        print("✓ Test 10 passed")
     finally:
         # Cleanup
         os.unlink(temp_mapping_file)  # Remove temporary mapping file

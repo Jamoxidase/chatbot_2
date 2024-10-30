@@ -153,7 +153,7 @@ class Sprinzl(ToolManager):
     def __init__(self, work_dir: str, enable_logging: bool = True):
         super().__init__(work_dir, enable_logging)
         
-        self.sprinzl_dir = '/usr/local/lib' #TOOLS_ROOT / 'trna_software' / 'sprinzl' ########
+        self.sprinzl_dir = TOOLS_ROOT / 'trna_software' / 'sprinzl' ########
         self.executable = self.sprinzl_dir / 'tRNA_sprinzl_pos'
         
         if not self.executable.is_file():

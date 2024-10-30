@@ -13,9 +13,6 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 from webdriver_manager.chrome import ChromeDriverManager
 
-
-
-
 class rnaCentralTool:
     '''
     When the chatbot initiates tool use, the tool request message is sent here, parsed, and the appropriate sequences are retrieved and returned to the bot.
@@ -27,7 +24,7 @@ class rnaCentralTool:
         "author", "pubmed", "doi", "md5", "interacting_protein", "interacting_rna",
         "evidence_for_interaction", "has_secondary_structure", "has_conserved_structure",
         "has_go_annotations", "has_genomic_coordinates", "has_interacting_proteins",
-        "has_interacting_rnas", "has_lit_scan", "has_litsumm", "has_editing_event"
+        "has_interacting_rnas", "has_lit_scan", "has_litsumm", "has_editing_event", "sequence_id"
     ]
 
     AA_TO_ANTICODONS = {
@@ -61,9 +58,7 @@ class rnaCentralTool:
             sequence_cache = SequenceCache()
         
         self.sequence_cache = sequence_cache
-
         self.driver = self._setup_driver()
-
 
     @staticmethod
     def _setup_driver():
@@ -76,17 +71,32 @@ class rnaCentralTool:
         service = ChromeService(ChromeDriverManager().install())
         return webdriver.Chrome(service=service, options=chrome_options)
 
-    def parse_search_terms(self, claude_response: str) -> Tuple[Dict[str, Any], Optional[int]]:
+    def parse_search_terms(self, claude_response: str) -> Tuple[Dict[str, Any], Optional[int], Optional[str]]:
         search_terms = {'expert_db': '"GtRNAdb"'}  # Always include GtRNAdb
         num_sequences = None
         amino_acid = None
+        rnacentral_id = None
 
         field_value_pairs = re.findall(r'(\w+):\s*"([^"]+)"', claude_response)
         
         for field, value in field_value_pairs:
             field = field.lower()
             
-            if field == 'num_sequences':
+            if field == 'description':
+                # Check for RNACentral ID pattern (URS...)
+                urs_match = re.search(r'(URS[A-Fa-f0-9]+_\d+)', value)
+                if urs_match:
+                    rnacentral_id = urs_match.group(1)
+                else:
+                    search_terms[field] = f'"{value}"'
+            elif field == "sequence_id":
+                urs_match = re.search(r'(URS[A-Fa-f0-9]+_\d+)', value)
+                if urs_match:
+                    rnacentral_id = urs_match.group(1)
+                else:
+                    search_terms[field] = f'"{value}"'
+                
+            elif field == 'num_sequences':
                 num_sequences = None if value.lower() == 'none' else self._parse_num_sequences(value)
             elif field == 'amino_acid':
                 amino_acid = value.upper()
@@ -95,10 +105,10 @@ class rnaCentralTool:
             else:
                 print(f"Unrecognized search field: {field}")
 
-        if amino_acid:
+        if amino_acid and not rnacentral_id:  # Only add amino acid query if no direct RNACentral ID
             search_terms['amino_acid_query'] = self._get_amino_acid_query(amino_acid)
 
-        return search_terms, num_sequences
+        return search_terms, num_sequences, rnacentral_id
 
     @staticmethod
     def _parse_num_sequences(value: str) -> Optional[int]:
@@ -119,7 +129,11 @@ class rnaCentralTool:
         return None
 
     def construct_search_query(self, claude_response: str) -> Tuple[str, Optional[int]]:
-        search_terms, num_sequences = self.parse_search_terms(claude_response)
+        search_terms, num_sequences, rnacentral_id = self.parse_search_terms(claude_response)
+        
+        if rnacentral_id:
+            return rnacentral_id, num_sequences
+
         query_parts = [f'expert_db:{search_terms["expert_db"]}']
         
         for field, value in search_terms.items():
@@ -135,6 +149,14 @@ class rnaCentralTool:
 
     def search_rnacentral(self, query: str) -> Tuple[List[str], str]:
         try:
+            # Check if query is a direct RNACentral ID
+            if query.startswith('URS'):
+                url = f"https://rnacentral.org/rna/{query}"
+                print(f"Direct RNACentral ID search URL: {url}")
+                self.driver.get(url)
+                return [query], url
+            
+            # Normal search query
             encoded_query = quote(query, safe='":')
             url = f"https://rnacentral.org/search?q={encoded_query}"
             
@@ -191,9 +213,8 @@ class rnaCentralTool:
         if hasattr(self, 'driver'):
             self.driver.quit()
 
-
     def use_rna_central_tool(self, step: str) -> Dict[str, Any]:
-        print(f"Received step: {step}") #debug
+        print(f"Received step: {step}")  # debug
         search_query, num_sequences = self.construct_search_query(step)
         rnacentral_ids, full_results_url = self.search_rnacentral(search_query)
         
@@ -213,8 +234,6 @@ class rnaCentralTool:
             }
         else:
             return {"error": "No tRNA sequences found for the given query."}
-
-
 
 
 if __name__ == '__main__':

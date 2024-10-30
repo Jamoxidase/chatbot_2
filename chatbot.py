@@ -9,12 +9,15 @@ from tools.rnaCentral import rnaCentralTool
 from tools.basicAlignment import BasicAlignmentTool
 from tools.sprinzl import RunPipeline
 from tools.rnaComprnaoser import RNAFoldingTool
+from tools.cacheCrawl import DBSearchTool
 
 class ToolType(Enum):
     GET_TRNA = "GET_TRNA"
     ALIGNER = "ALIGNER"
     TRNASCAN_SPRINZL = "tRNAscan-SE/SPRINZL"
     TERTIARY_STRUCT = "TERTIARY_STRUCT"
+    CHECK_DB = "CHECK_DB"
+
 
 @dataclass
 class ToolResult:
@@ -59,7 +62,8 @@ class PlanningAgent:
         return response.content[0].text
 
     def _get_planning_system_prompt(self) -> str:
-        return """You are a tRNA Bioinformatics Planning Agent that specializes in analyzing user requests and 
+        return """
+        START OF SYSTEM PROMPT: NOTE THAT DATA IN THE PROMPT ARE EXAMPLES OF HOW TO USE TOOLS, NOT ACTUAL DATA. You are a tRNA Bioinformatics Planning Agent that specializes in analyzing user requests and 
         determining the next necessary tool action. You focus solely on planning and identifying the immediate 
         next step needed.\n\n
         Your responses must be minimal and focused only on the next tool action required. Do not engage in 
@@ -69,6 +73,78 @@ class PlanningAgent:
         1. GET_TRNA - Retrieves tRNA sequences using specific search criteria\n
         2. ALIGNER - Aligns two tRNA sequences (requires sequence IDs from previous GET_TRNA results)
         3. tRNAscan-SE/SPRINZL - Analyzes tRNA structure and position (requires RNAcentral ID and clade)\n
+        4. TERTIARY_STRUCT - Predicts RNA 3D structure using sequence and secondary structure (requires valid RNAcentral ID)\n
+        5. CHECK_DB - Searches the database for specific tRNA data\n\n
+
+        The CHECK_DB tool allows searching for tRNA sequences in the local database before making external API calls. This tool should be used first when the user refers to specific tRNAs or RNACentral IDs before falling back to the GET_TRNA tool.
+
+Valid search fields:
+- sequence_id: RNACentral ID (e.g., "URS000000002F_4950")
+- friendly_name: Human-readable name (e.g., "tRNA-Leu-GAG-1-1")
+- rnacentral_link: Full RNACentral URL
+- locations: Genomic location information
+- num_locations: Number of genomic locations
+
+Queries can use AND/OR operations and multiple queries can be separated by NEXT_QUERY.
+
+Example proper usage:
+CHECK_DB sequence_id:"URS000000002F_4950" operation:"AND"
+Copyor multiple queries:
+CHECK_DB sequence_id:"URS000000002F_4950" operation:"AND"
+NEXT_QUERY
+friendly_name:"tRNA-Leu" locations:"CM000681" operation:"OR"
+Copy
+Example improper usage:
+sequence_id:"URS000000002F_4950"  # Missing CHECK_DB flag
+CHECK_DB sequence:"ACGU"          # Invalid field 'sequence'
+CHECK_DB                          # Missing search terms
+Copy
+Tool behavior:
+1. Returns full sequence data if exactly one match is found
+2. Returns "No results found, use GET_TRNA tool to acquire sequence data" if no matches
+3. Returns "Multiple results found, please ask user for more specificity" if multiple matches
+
+Usage priority:
+1. Use CHECK_DB when:
+   - User mentions specific RNACentral IDs
+   - User refers to specific tRNAs by name
+   - User asks about specific genomic locations
+   - User wants to check if we already have certain sequences
+
+2. Use GET_TRNA when:
+   - CHECK_DB returns no results
+   - User wants to search for new tRNAs
+   - User makes general queries about tRNA types
+   - User doesn't specify particular tRNAs
+
+Example CHECK_DB usage flow:
+User: "Can you tell me about the tRNA with ID URS000000002F_4950?"
+Assistant should:
+1. First try: CHECK_DB sequence_id:"URS000000002F_4950" operation:"AND"
+2. If no results: Use GET_TRNA tool with appropriate search terms
+
+Example proper usage:
+CHECK_DB sequence_id:"URS000000002F_4950" operation:"AND"
+Copyor multiple queries:
+CHECK_DB sequence_id:"URS000000002F_4950" operation:"AND"
+NEXT_QUERY
+friendly_name:"tRNA-Leu" locations:"CM000681" operation:"OR"
+Copy
+Example improper usage:
+sequence_id:"URS000000002F_4950"  # Missing CHECK_DB flag
+CHECK_DB sequence:"ACGU"          # Invalid field 'sequence'
+CHECK_DB                          # Missing search terms
+Let me check the database using CHECK_DB friendly_name:"tRNA-Met-CAT-7-1" operation:"AND"  # Contains explanatory text
+First let's use the CHECK_DB tool:
+CHECK_DB friendly_name:"tRNA-Met-CAT-7-1" operation:"AND"  # Contains explanatory text
+Copy
+The CHECK_DB command must:
+1. Be at the very start of the message
+2. Not contain any explanatory text before or after the command
+3. Use only valid search fields
+4. Include the operation type
+
+This approach minimizes API calls and provides faster responses when data is already available locally.
         
         GET_TRNA Query Field Requirements:\n
         - expert_db: \"GtRNAdb\" (default, always included)\n
@@ -91,8 +167,14 @@ class PlanningAgent:
         - has_genomic_coordinates: e.g., \"True\"\n
         - num_sequences: Controls result quantity\n  * Default: \"5\"\n  * Single sequence: \"1\"\n  * No limit: \"None\"\n\n
         
-        Thanks but you can't just say "NOT Sec" unfortunately. A much better use of your resources would be to use your reasoning to pick a specific AA.
+        NOTE THAT YOU WILL BE UNSUCESSFUL IF YOU TRY FINDING BY RNACENTRAL ID USING DESCRIPTION FIELD. IF USER SPECIFIES RNACENTRAL ID, 
+        ASSUME THAT WE HAVE ALREADY GOTTEN THE DATA AND MOVE TO NEXT STEP.
 
+        if user asks for info about URS000072BBEB_9606, DO NOT DO THIS: description:"URS000072BBEB_9606", assume that we already have the data and move
+        to next step / plan completion.
+
+        Thanks but you can't just say "NOT Sec" unfortunately. A much better use of your resources would be to use your reasoning to pick a specific AA.
+        Note: if a query fails you should consider altering the query, you should not try the same thing more than 3 times.
         Query Formatting Rules:\n
         1. Use exact field names and formatting: field:\"value\"\n
         2. Multiple criteria combine with spaces: field1:\"value1\" field2:\"value2\"\n
@@ -157,7 +239,7 @@ class PlanningAgent:
 
 
         4. TERTIARY_STRUCT - Predicts RNA 3D structure using sequence and secondary structure (requires valid RNAcentral ID)
-
+- ONLY USE TERTIARY STRUCTURE IF YOU NEED THIS DATA TO ADDRESS USER PROMPT. IF USER SENDS PROMPT UNRELATED TO TERTIARY STRUCTURE, DO NOT USE THIS TOOL.
 Example Valid TERTIARY_STRUCT Usage:
 TERTIARY_STRUCT
 RNAcentral ID: URS0000C8E9CE_9606
@@ -171,6 +253,8 @@ Remember for TERTIARY_STRUCT:
 - Must use complete RNAcentral ID including taxonomy (e.g., '_9606')
 - Tool extracts sequence and structure data from cache 
 - Only use with valid RNAcentral IDs from previous GET_TRNA results
+- Do not use tool unless user specifically asks you about the tertiary structure. You should never use this tool unprompted, unless the user asks you to take the lead and you choose to. 
+- Note that this tool will not run if we have not previouslty used the sprinzl tool on the sequence.
 
         Final note: you should never return an empty response, if you have no plan to make, you should return PLAN_COMPLETE=True
         IMPORTANT: Remember to base the objective of your plan off the the users origional query. For example, if the user asks for trnas,
@@ -189,19 +273,24 @@ Remember for TERTIARY_STRUCT:
 
         
         If user asks you to run sprizl on a sequence, use the tool. Otherwise, dont use the tool.
-        Example INVALID useage: 
+        EXAMPLE INVALID useage: 
         You: "To run the Sprinzl tool on the tRNA we retrieved earlier, we need to use the tRNAscan-SE/SPRINZL tool with the RNAcentral ID and the appropriate clade. Here's the next step in our plan:
         tRNAscan-SE/SPRINZL
         RNAcentral ID: URS00001DA281_9606
         Clade: Eukaryota"
 
-        Example VALID useage response:
+        EXAMPLE VALID useage response:
         You: "tRNAscan-SE/SPRINZL
         RNAcentral ID: URS00001DA281_9606
         Clade: Eukaryota"
 
-    
-        
+    Important: we want to be conversational, so rather than make assumtions about what the user wants, it can be good to ask clarifying questions.
+    In order to get more input from the user, you must mark plan as complete so we can get more input from the user. For example, do not assume that
+    the user wants you to run sprinzl if they didnt ask. You can of course ask the user if they would like you to run sprinzl on the sequence. 
+
+    Note: if a tools output suggests that you stop to ask for more information from the user, you should handle this by returning PLAN_COMPLETE=True.
+    ###################
+    END OF SYSTEM PROMPT. 
     """ + str(self.chat_history)
 
 
@@ -330,15 +419,19 @@ class UserFacingAgent:
         - Create hypothetical scenarios with specific sequences
 
         IMPORTANT: do not include the actual data, but reference what you are talking about. The user also has the data already.
+        Note that if tool output suggests to ask the user for more information, you should conversationally ask for the additional info needed.
+               
+        remember that our goal is to be conversational, not to just give boring responses. Its critically importatnt to stay grounded in factual reality, but you should chat like a professional trna researcher friend and collegue
                """
 
 class ToolManager:
-    def __init__(self, rna_central_tool, alignment_tool, trnascan_sprinzl_tool, tertiary_struct_tool): # fix this gobbldy gook
+    def __init__(self, rna_central_tool, alignment_tool, trnascan_sprinzl_tool, tertiary_struct_tool, db_search_tool): # fix this gobbldy gook
         self.tools = {
             ToolType.GET_TRNA: self._create_rna_central_handler(rna_central_tool),
             ToolType.ALIGNER: self._create_alignment_handler(alignment_tool),
             ToolType.TRNASCAN_SPRINZL: self._create_trnascan_sprinzl_handler(trnascan_sprinzl_tool),
-            ToolType.TERTIARY_STRUCT: self._create_tertiary_struct_handler(tertiary_struct_tool)
+            ToolType.TERTIARY_STRUCT: self._create_tertiary_struct_handler(tertiary_struct_tool),
+            ToolType.CHECK_DB: self. _create_dbsearch_handler(db_search_tool)
         }
 
     def _create_trnascan_sprinzl_handler(self, trnascan_sprinzl_tool):
@@ -384,6 +477,20 @@ class ToolManager:
             )
         return handler
 
+    def _create_dbsearch_handler(self, db_search_tool):
+        def handler(plan_response: str) -> ToolResult:
+            # Extract sequence IDs from plan_response if needed
+            result = db_search_tool.use_db_search_tool(plan_response)
+            print("DB SEARCH HANGLER")
+            print("plan: ", plan_response)
+            print("result: ", result)
+            return ToolResult(
+                tool_type=ToolType.CHECK_DB,
+                data=result,
+                raw_output=str(result)
+            )
+        return handler
+
     def execute_tool(self, plan_response: str) -> Optional[ToolResult]:
         tool_type = self._identify_tool(plan_response)
         if not tool_type:
@@ -400,6 +507,8 @@ class ToolManager:
             return ToolType.TRNASCAN_SPRINZL
         elif "TERTIARY_STRUCT" in plan_response:
             return ToolType.TERTIARY_STRUCT
+        elif "CHECK_DB" in plan_response:
+            return ToolType.CHECK_DB
         return None
 
 class TwoAgentChatbot:
@@ -412,6 +521,7 @@ class TwoAgentChatbot:
             alignment_tool=BasicAlignmentTool(sequence_cache),
             trnascan_sprinzl_tool=RunPipeline(sequence_cache),
             tertiary_struct_tool=RNAFoldingTool(sequence_cache),
+            db_search_tool=DBSearchTool(sequence_cache)
         ) # why is this so ugly- tools hsould be standatdized
     
     def process_query(self, user_input: str) -> str:
