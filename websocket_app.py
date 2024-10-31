@@ -1,4 +1,3 @@
-# websocket_app.py
 import asyncio
 import websockets
 import json
@@ -9,19 +8,167 @@ from typing import Set, Optional
 import logging
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+import secrets
+import hmac
+import hashlib
+from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+import sys
+import signal
+
+# Load environment variables
+load_dotenv()
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+incorrect_password_attempts = 0
+
+class AuthenticationError(Exception):
+    incorrect_password_attempts = 0  # Class variable to track attempts across instances
+    MAX_ATTEMPTS = 5
+
+    def __init__(self, message="Authentication failed"):
+        super().__init__(message)
+        AuthenticationError.incorrect_password_attempts += 1
+        
+        if AuthenticationError.incorrect_password_attempts >= self.MAX_ATTEMPTS:
+            logger.error("Too many incorrect password attempts. Shutting down server.")
+            os.kill(os.getpid(), signal.SIGTERM)
+            sys.exit(1)  
 
 class WebSocketServer:
     def __init__(self):
         logger.info("Initializing WebSocket Server and Chatbot...")
         self.sequence_cache = SequenceCache()
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
+        self.authenticated_clients: Set[websockets.WebSocketServerProtocol] = set()
         self.executor = ThreadPoolExecutor(max_workers=4)
         self.sequence_cache.set_update_callback(self.handle_db_update)
         self.sequence_cache.set_event_loop(asyncio.get_event_loop())
         self.chatbot = TwoAgentChatbot(sequence_cache=self.sequence_cache)
+        
+        
+        # Get password from environment variable or use default (not for production)
+        self.PASSWORD = os.getenv('WS_PASSWORD')
+        # Secret key for token signing
+        self.SECRET_KEY = os.getenv('SECRET_KEY', secrets.token_hex(32))
+        # Store active tokens with expiration
+        self.active_tokens = {}
+
+    def generate_token(self) -> str:
+        """Generate a secure token with expiration"""
+        token = secrets.token_hex(32)
+        expiration = datetime.now() + timedelta(hours=24)  # Token expires in 24 hours
+        signature = hmac.new(
+            self.SECRET_KEY.encode(),
+            token.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        self.active_tokens[token] = {
+            'expiration': expiration,
+            'signature': signature
+        }
+        return token
+
+    def verify_token(self, token: str) -> bool:
+        """Verify if a token is valid and not expired"""
+        if token not in self.active_tokens:
+            return False
+        
+        token_data = self.active_tokens[token]
+        if datetime.now() > token_data['expiration']:
+            del self.active_tokens[token]
+            return False
+            
+        expected_signature = hmac.new(
+            self.SECRET_KEY.encode(),
+            token.encode(),
+            hashlib.sha256
+        ).hexdigest()
+        return hmac.compare_digest(token_data['signature'], expected_signature)
+
+    async def authenticate(self, websocket, password: str) -> str:
+        """Authenticate a client and return a token"""
+        if password == self.PASSWORD:
+            token = self.generate_token()
+            self.authenticated_clients.add(websocket)
+            return token
+        raise AuthenticationError("Invalid password")
+
+    async def handle_message(self, websocket):
+        try:
+            async for message in websocket:
+                try:
+                    data = json.loads(message)
+                    
+                    # Handle authentication
+                    if data.get('type') == 'auth':
+                        try:
+                            token = await self.authenticate(websocket, data.get('password', ''))
+                            await websocket.send(json.dumps({
+                                'type': 'auth_success',
+                                'token': token
+                            }))
+                            await self.register(websocket)
+                            continue
+                        except AuthenticationError as e:
+                            await websocket.send(json.dumps({
+                                'type': 'auth_error',
+                                'message': str(e)
+                            }))
+                            continue
+                    
+                    # Check authentication for all other messages
+                    token = data.get('token')
+                    if not token or not self.verify_token(token):
+                        await websocket.send(json.dumps({
+                            'type': 'auth_error',
+                            'message': 'Invalid or expired token'
+                        }))
+                        continue
+
+                    # Handle regular messages
+                    user_input = data.get('message')
+                    if not user_input:
+                        await websocket.send(json.dumps({
+                            'type': 'error',
+                            'message': 'No message provided'
+                        }))
+                        continue
+
+                    print(f"Processing query: {user_input}")
+                    response = await asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        self.chatbot.process_query,
+                        user_input
+                    )
+                    
+                    await websocket.send(json.dumps({
+                        'type': 'response',
+                        'message': response
+                    }))
+                    
+                except json.JSONDecodeError:
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': 'Invalid JSON format'
+                    }))
+                except Exception as e:
+                    print(f"Error processing message: {str(e)}")
+                    await websocket.send(json.dumps({
+                        'type': 'error',
+                        'message': str(e)
+                    }))
+                    
+        except websockets.exceptions.ConnectionClosed:
+            print("Client connection closed")
+        finally:
+            await self.unregister(websocket)
+            if websocket in self.authenticated_clients:
+                self.authenticated_clients.remove(websocket)
+
 
     async def handle_db_update(self, sequence_id: Optional[str], update_type: str):
         """Handle database updates based on type"""
@@ -159,46 +306,6 @@ class WebSocketServer:
         await asyncio.gather(
             *[client.send(message) for client in self.clients]
         )
-
-    async def handle_message(self, websocket):
-        await self.register(websocket)
-        try:
-            async for message in websocket:
-                try:
-                    data = json.loads(message)
-                    user_input = data.get('message')
-                    
-                    if not user_input:
-                        await websocket.send(json.dumps({
-                            'type': 'error',
-                            'message': 'No message provided'
-                        }))
-                        continue
-
-                    print(f"Processing query: {user_input}")
-                    
-                    response = await asyncio.get_event_loop().run_in_executor(
-                        None, 
-                        self.chatbot.process_query,
-                        user_input
-                    )
-                    
-                    await websocket.send(json.dumps({
-                        'type': 'response',
-                        'message': response
-                    }))
-                    
-                except Exception as e:
-                    print(f"Error processing message: {str(e)}")
-                    await websocket.send(json.dumps({
-                        'type': 'error',
-                        'message': str(e)
-                    }))
-                    
-        except websockets.exceptions.ConnectionClosed:
-            print("Client connection closed")
-        finally:
-            await self.unregister(websocket)
 
     async def start(self, host='0.0.0.0', port=8765):
         """Start the WebSocket server with CORS support"""
